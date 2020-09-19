@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Apr  5 23:21:21 2020
+
+@author: peces
+"""
+
+import pandas as pd
+import numpy as np
+import os
+import plotly.io as pio
+from tqdm import tqdm
+pio.renderers.default = "browser"
+
+
+# %% Reunify all data gathered
+# path = '/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/filtered/'
+# N_LIMIT_HOURS = 8664
+# csv_files = os.listdir(path)
+# csv_files.remove('.DS_Store')
+# csv_files.remove('irradiation.csv')
+
+# data = pd.read_csv(path+'filtered/' + csv_files[0], nrows = N_LIMIT_HOURS)
+# csv_files.remove(csv_files[0])
+
+# for file in csv_files:
+#     df_new = pd.read_csv(path + file, nrows = N_LIMIT_HOURS)
+#     data = pd.concat([data,df_new],axis=1)
+#     #print(file)
+#     #print(len(data))
+#     #print('\n')
+
+# data.to_csv(path+'filtered/all_nodes.csv')
+
+
+
+# %% Definition of Model
+# First definitions
+path = '/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/filtered/'
+GHI_NAME = 'irradiation.csv'
+LMP_NAME = 'all_nodes.csv'
+N_HOURS = 8664
+EFFICIENCY = 0.2
+SIZE_PV = 10000# In m^2
+
+DEVIATION_LMP = 0.1
+DEVIATION_GENERATION = 0.1
+
+LCOE = 3.5e-2 * 1000 #In $/MWh
+WACC = 0.0075
+
+# Read inyectable quantity of MW, according to location - assumes efficiency 20% and 1 hectarea - in MW
+iny_power = (pd.read_csv(path + GHI_NAME)).multiply(SIZE_PV*EFFICIENCY*1e-6)
+iny_power['N_hour'] = iny_power['N_hour'].multiply(1/(SIZE_PV*EFFICIENCY*1e-6))
+
+# Read hourly marginal prices files - in $/MWh
+lmp = pd.read_csv(path + LMP_NAME)
+node_names = list(lmp.columns)
+lmp = lmp.drop(columns = node_names[0]) # Get rid of index column
+node_names.remove(node_names[0])
+
+
+# Create dictionary to assign nodes with geographical areas
+dict_nodes_areas = {
+    'NY_CAPITL':'capital.csv',
+    'NY_CENTRL': 'central.csv',
+    'NY_DUNWOD':'south.csv',
+    'NY_GENESE': 'genesse.csv',
+    'NY_HQ':'mo_valley.csv',
+    'NY_HUDSON_VALLEY': 'south.csv',
+    'NY_LONG_ISLAND':'nyc.csv',
+    'NY_MILLWD': 'south.csv',
+    'N.Y.C.':'nyc.csv',
+    'NY_NORTH': 'north.csv',
+    'NY_NPX':'capital.csv',
+    'NY_OH': 'mo_valley.csv',
+    'NY_PJM':'central.csv',
+    'NY_WEST': 'west.csv',
+    'NY_MHKVL': 'mo_valley.csv',
+    'TX_AEN' : 'TEXAS.csv',
+    'TX_HOUSTON' : 'TEXAS.csv',
+    'TX_LCRA' : 'TEXAS.csv',
+    'TX_NORTH' : 'TEXAS.csv',
+    'TX_RAYBN' : 'TEXAS.csv',
+    'TX_SOUTH' : 'TEXAS.csv',
+    'TX_WEST' : 'TEXAS.csv',
+    'TX_AEN' : 'TEXAS.csv',
+    'TX_CPS' : 'TEXAS.csv',
+    'TEXAS' : 'TEXAS.csv',
+    }
+
+# Add the rest of non-manually-necessary nodes
+for node in node_names:
+    if node not in dict_nodes_areas:
+        dict_nodes_areas[node] = node + '.csv'
+
+
+# %% Calculate potential earnings
+ear_aux = np.zeros([1, N_HOURS])
+for node in node_names:
+    #earnings[node] =  np.multiply(lmp_ny.loc[:8712,[node]],iny_power.loc[:8711,[dict_nodes_areas[node]]])
+    ear_aux = np.append(ear_aux, (np.multiply(lmp.loc[:N_HOURS,[node]],iny_power.loc[:N_HOURS-1,[dict_nodes_areas[node]]].values).transpose()),axis=0)
+
+earnings = pd.DataFrame(np.transpose(ear_aux[1:]), columns = node_names) # in $
+earnings[earnings < 0] = 0
+
+# Now we integrate the earnings along the year simulation
+total_yearly_earnings = np.zeros([len(node_names),1])
+total_yearly_generation = np.zeros([len(node_names),1])
+for i in range(len(node_names)):
+    total_yearly_earnings[i] =  np.trapz(earnings[node_names[i]]) # $
+    total_yearly_generation[i] = np.trapz(iny_power[dict_nodes_areas[node_names[i]]]) # MWh
+
+
+# %% Cost estimation
+
+costs_yearly = LCOE * total_yearly_generation
+profit_yearly = total_yearly_earnings-costs_yearly
+
+
+# Simulation for 25 years
+def randomize(value,deviation):
+    return value*(1+np.random.normal(0,deviation))
+
+total_yearly_earnings_25 = np.zeros([len(node_names),25])
+total_yearly_generation_25 = np.zeros([len(node_names),25])
+for i in tqdm(range(25)):
+    
+    ear_aux = np.zeros([1, N_HOURS])
+    lmp_aux = np.zeros([1, N_HOURS])
+    iny_power_aux = np.zeros([len(node_names), N_HOURS])
+    c = 0
+    for node in node_names:
+        lmp_aux[0,:] = lmp.apply(lambda x: randomize(x[node],DEVIATION_LMP),axis=1)
+        iny_power_aux[c,:] = (iny_power.loc[:N_HOURS-1,[dict_nodes_areas[node]]]).apply(lambda x: randomize(x[dict_nodes_areas[node]],DEVIATION_GENERATION),axis=1)
+        ear_aux = np.append(ear_aux, (np.multiply(lmp_aux,iny_power_aux[c,:])),axis=0)
+        c = c+1
+    earnings = pd.DataFrame(np.transpose(ear_aux[1:]), columns = node_names) # in $
+    earnings[earnings < 0] = 0
+    
+    # Now we integrate the earnings along the year simulation
+    total_yearly_earnings = np.zeros([len(node_names)])
+    total_yearly_generation = np.zeros([len(node_names)])
+    
+    c = 0
+    for node in node_names:
+        
+        total_yearly_earnings[c] =  np.trapz(earnings[node])/(1+WACC)**i # $
+        total_yearly_generation[c] = np.trapz(iny_power_aux[c,:]) #np.trapz(iny_power[dict_nodes_areas[node_names[j]]]) # MWh
+        c = c+1
+        
+    #print('year ' + str(i+1) + ': ' )
+    #print(total_yearly_earnings)
+    
+    total_yearly_earnings_25[:,i] = total_yearly_earnings
+    total_yearly_generation_25[:,i] = total_yearly_generation
+    
+# %% Save data
+df_earnings = pd.DataFrame(data=np.transpose(total_yearly_earnings_25), columns=node_names)
+df_generation = pd.DataFrame(data=np.transpose(total_yearly_generation_25), columns=node_names)
+df_earnings.to_csv('/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/results/25YearsEarnings.csv', index=False)
+df_generation.to_csv('/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/results/25YearsGeneration.csv', index=False)
+
+# %% Load results
+# If data was saved, you can loaded from the lines below
+# 
+# 
+# 
+    
+
+# %% Compute results
+LCOE = 3e-2 * 1000
+benefit_cost = np.empty([len(node_names)])
+for i in range(len(node_names)):
+    benefit_cost[i] = sum(total_yearly_earnings_25[i])/(sum(total_yearly_generation_25[i])*LCOE)
+    
+# Save final and useful data 
+# Describe of each node + B/C ratio
+#lmp['NY_HQ'].describe
+df_toStore = pd.DataFrame()
+for node in node_names:
+    df_toStore[node] = lmp[node].describe()
+
+# Pass a series in append() to append a row in dataframe 
+index_name = list(df_toStore.index)
+df_toStore = df_toStore.append(pd.Series(benefit_cost, index=df_toStore.columns ), ignore_index=True)
+index_name.append('BC_ratio')
+df_toStore.index = index_name
+
+df_trans = df_toStore.transpose()
+df_trans['State'] = df_trans.index
+
+# %% Prepare coordinates
+dict_latitudes = {
+    'NY_CAPITL' : 43.010541,
+    'NY_CENTRL' : 42.276760,
+    'NY_DUNWOD' : 41.842657,
+    'NY_GENESE' : 42.476760,
+    'NY_HQ' : 41.62657,
+    'NY_HUDSON_VALLEY' : 43.510541,
+    'NY_LONG_ISLAND' : 40.842657,
+    'NY_MHKVL': 42.910541,
+    'NY_MILLWD':42.910541,
+    'N.Y.C.': 41.32657,
+    'NY_NORTH': 42.810541,
+    'NY_NPX': 42.842657,
+    'NY_OH': 43.842657,
+    'NY_PJM' : 37.961863,
+    'NY_WEST' : 42.480988,
+    'MINNESOTA' : 46.729553,
+    'MICHIGAN' : 44.314844,
+    'ILLINOIS' : 40.633125,
+    'INDIANA' : 40.551217,
+    'ARKANSAS' : 35.20105,
+    'MISSISIPI' : 32.354668,
+    'TEXAS' : 31.968599,
+    'LOUISIANA' : 31.244823,
+    'MISOURI' : 37.964253,
+    'IOWA' : 41.878003,
+    'WISCONSIN' : 43.78444,
+    'N-DAKOTA' : 47.551493,
+    'S-DAKOTA': 43.969515,
+    'MONTANA' : 46.879682,
+    'TX_AEN' : 30.290202,
+    'TX_CPS' : 30.0202,
+    'TX_HOUSTON': 29.629678,
+    'TX_LCRA': 30.290202,
+    'TX_NORTH': 33.290202,
+    'TX_RAYBN' : 33.70202,
+    'TX_SOUTH': 28.549137,
+    'TX_WEST' : 33.576631,
+    'MAINE' : 45.253783,
+    'NEW_HAMPSHIRE': 43.193852,
+    'VERMONT': 44.558803,
+    'CONNETICUT' : 41.603221,
+    'RHODEISLAND' : 41.580095,
+    'SE_MASSACHUSETTS': 41.673413,
+    'WEST_MASSACHUSETTS' : 42.379526,
+    'BOSTON': 42.371063
+    }
+
+dict_longitudes = {
+    'NY_CAPITL': -74.039993,
+    'NY_CENTRL' : -77.061093,
+    'NY_DUNWOD' : -73.839993,
+    'NY_GENESE' : -77.461093,
+    'NY_HQ' : -73.79993,
+    'NY_HUDSON_VALLEY' : -74.039993,
+    'NY_LONG_ISLAND' : -73.120245,
+    'NY_MHKVL' : -74.839993,
+    'NY_MILLWD' : -73.539993,
+    'N.Y.C.': -73.120245,
+    'NY_NORTH': -73.8620245,
+    'NY_NPX' : -73.120245,
+    'NY_OH' : -73.120245,
+    'NY_PJM' : -80.930758,
+    'NY_WEST' : -78.603301,
+    'MINNESOTA' : -94.6859	,
+    'MICHIGAN' : -85.602364	,
+    'ILLINOIS' : -89.398528	,
+    'INDIANA' : -85.602364	,
+    'ARKANSAS' : -91.831833,
+    'MISSISIPI' : -89.398528	,
+    'TEXAS' : -99.901813	,
+    'LOUISIANA' : -92.145024	,
+    'MISOURI' : -91.831833	,
+    'IOWA' : -93.097702,
+    'WISCONSIN' : -88.787868	,
+    'N-DAKOTA': -101.002012	,
+    'S-DAKOTA': -99.901813	,
+    'MONTANA' : -110.362566	,
+    'TX_AEN': -97.855775,
+    'TX_CPS' : -96.855775,
+    'TX_HOUSTON' : -95.531738,
+    'TX_LCRA' : -98.855775,
+    'TX_NORTH': -96.95775,
+    'TX_RAYBN' : -95.855775,
+    'TX_SOUTH': -98.906276,
+    'TX_WEST' : -100.362416,
+    'MAINE' : -69.445469	,
+    'NEW_HAMPSHIRE' : -71.572395	,
+    'VERMONT' : -72.577841	,
+    'CONNETICUT' : -73.087749,
+    'RHODEISLAND' : -71.477429	,
+    'SE_MASSACHUSETTS' : -70.449744,
+    'WEST_MASSACHUSETTS':  -73.207462,
+    'BOSTON' : -70.986413
+    }
+
+df_trans['lat'] = df_trans['State'].map(dict_latitudes)
+df_trans['lon'] = df_trans['State'].map(dict_longitudes)
+
+# %% Add mean irradiation
+df_irr = pd.read_csv('/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/filtered/irradiation.csv')
+df_irr = df_irr.drop(columns = 'N_hour')
+dict_irr = {}
+for node in node_names:
+    dict_irr[node] = df_irr[dict_nodes_areas[node]].describe()['mean']
+    
+df_trans['Sun'] = df_trans['State'].map(dict_irr)
+
+# %% Store data
+#df_toStore.to_csv('/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/results/FinalResults.csv', index=True)
+df_trans.to_csv('/Users/peces/OneDrive - Georgia Institute of Technology/Winter2020/Electriciy_Markets/Project/data/results/FinalResults2.csv', index=False)
